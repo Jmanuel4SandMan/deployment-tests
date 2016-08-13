@@ -5,7 +5,10 @@ import subprocess
 import traceback
 
 import requests
+from threading import Thread
 from flask import Flask, request, jsonify, Response
+
+latest_build_log = "Nothing build yet.."
 
 # set up logging to file - see previous section for more details
 logging.basicConfig(level=logging.DEBUG,
@@ -34,6 +37,11 @@ def verify_hmac_hash(data, signature):
     return hmac.compare_digest('sha1=' + mac.hexdigest(), signature)
 
 
+@app.route("/latest_build_log")
+def show_latest_log():
+    return latest_build_log.replace("\n", "<br/>")
+
+
 @app.route("/payload", methods=['POST'])
 def github_payload():
     try:
@@ -45,34 +53,22 @@ def github_payload():
                     return jsonify({'msg': 'Ok'})
                 if request.headers.get('X-GitHub-Event') == "deployment":
                     payload = request.get_json()
-                    if payload['commits'][0]['distinct'] is True:
-                        try:
-                            logger.info(str(request))
-                            result = redeploy()
-                            return Response(result, mimetype='text/plain')
-                        except subprocess.CalledProcessError as error:
-                            print("Code deployment failed:" + error.output)
-                            return jsonify({'msg': str(error.output)})
-                        except Exception as fail:
-                            return Response("Deployment failed with statuscode {}\nLog:\n{}".format(fail.args[1],
-                                                                                                    fail.args[0])), 500
-
-                    else:
-                        return jsonify({'msg': 'nothing to commit'})
+                    logger.info(str(payload))
+                    Thread(target=redeploy, args=(payload,)).start()
+                    return Response("Starting deployment", mimetype='text/plain')
                 else:
                     logger.info(request.headers.get('X-GitHub-Event'))
                     return jsonify({'msg': 'ok thanks for letting me know!'})
             else:
                 return jsonify({'msg': 'hmmm somthing is wrong'}), 500
-
-
         else:
             return jsonify({'msg': 'invalid hash'})
     except Exception as err:
         traceback.print_exc()
 
 
-def redeploy():
+def redeploy(payload):
+    update_deployment_status(payload, "pending", "shutting down app")
     result = "shutting down son-editor\n"
     logger.info("shutting down son-editor")
     try:
@@ -85,13 +81,37 @@ def redeploy():
         logger.warning(err)
     result += "starting deployment\n"
     logger.info("starting deployment")
-    result += runProcess(['git', 'stash'])  # saving config
-    result += runProcess(['git', 'pull'])
-    result += runProcess(['git', 'stash', 'pop'])  # restoring config
-    result += runProcess(['python', 'setup.py', 'build'])
-    result += runProcess(['python', 'setup.py', 'install'])
-    result += runInBackground(['son-editor'])
+    try:
+        update_deployment_status(payload, "pending", "pulling changes")
+        result += runProcess(['git', 'stash'])  # saving config
+        result += runProcess(['git', 'pull'])
+        result += runProcess(['git', 'stash', 'pop'])  # restoring config
+
+        update_deployment_status(payload, "pending", "building app")
+        result += runProcess(['python', 'setup.py', 'build'])
+        result += runProcess(['python', 'setup.py', 'install'])
+
+        update_deployment_status(payload, "pending", "starting app")
+        result += runInBackground(['son-editor'])
+
+        update_deployment_status(payload, "success", "Deployment finished")
+
+    except subprocess.CalledProcessError as error:
+        logger.exception("Code deployment failed")
+        update_deployment_status(payload, "failure", "Deployment failed, see log for details")
+        return jsonify({'msg': str(error.output)})
+    except Exception as fail:
+        logger.exception("Code deployment failed")
+        update_deployment_status(payload, "failure",
+                                 "Deployment failed with statuscode {}\nLog:\n{}".format(fail.args[1],
+                                                                                         fail.args[0]))
     return result
+
+
+def update_deployment_status(payload, state, description):
+    headers = {"Accept": "application/json",
+               "Authorization": "token " + "3341ed2f90c984baaaba90d387affe7a851573b4"}
+    requests.post(payload["deployment"]["url"] + "/statuses", json={"state": state, "description": description})
 
 
 def runInBackground(exe):
