@@ -35,6 +35,7 @@ logger = logging.getLogger("github-webhook")
 
 app = Flask(__name__)
 
+
 def verify_hmac_hash(data, signature):
     github_secret = bytes(CONFIG['github-secret'], 'UTF-8')
     mac = hmac.new(github_secret, msg=data, digestmod=hashlib.sha1)
@@ -61,7 +62,7 @@ def github_payload():
                 if request.headers.get('X-GitHub-Event') == "deployment":
                     payload = request.get_json()
                     logger.debug(str(payload))
-                    Thread(target=redeploy, args=(payload,build_log_url)).start()
+                    Thread(target=redeploy, args=(payload, build_log_url)).start()
                     return Response("Starting deployment", mimetype='text/plain')
                 else:
                     logger.warn(request.headers.get('X-GitHub-Event'))
@@ -82,25 +83,30 @@ def redeploy(payload, build_log_url):
             required = command['required']
 
         if 'update-status' in command:
-            update_deployment_status(payload, "pending", command['update-status'],build_log_url)
-
-        if 'request' in command:
+            update_deployment_status(payload, "pending", command['update-status'], build_log_url)
+        elif 'request' in command:
+            if command['request'] is not None:
+                logger.info(command['request'])
             try:
                 res = None
-                if command['method'] is 'GET':
-                    res = requests.get(request['url'])
-                elif command['method'] is 'POST':
-                    res = requests.post(request['url'])
+                if command['method'] == 'GET':
+                    res = requests.get(command['url'])
+                elif command['method'] == 'POST':
+                    res = requests.post(command['url'])
                 if res is not None:
                     logger.info("Response was:" + res.text)
             except Exception as err:
                 if required:
                     logger.exception("Code deployment failed")
-                    update_deployment_status(payload, "failure", "Deployment failed, see log for details",build_log_url)
+                    update_deployment_status(payload, "failure", "Deployment failed, see log for details",
+                                             build_log_url)
                     return
                 else:
+                    update_deployment_status(payload, "error", "Deployment failed, see log for details", build_log_url)
                     logger.exception("Code deployment had an error")
         elif 'run' in command:
+            if command['run'] is not None:
+                logger.info(command['run'])
             try:
                 if 'sync' in command:
                     runProcess(command['sync'].split())
@@ -109,15 +115,17 @@ def redeploy(payload, build_log_url):
             except subprocess.CalledProcessError as error:
                 if required:
                     logger.exception("Code deployment failed")
-                    update_deployment_status(payload, "failure", "Deployment failed, see log for details",build_log_url)
+                    update_deployment_status(payload, "failure", "Deployment failed, see log for details",
+                                             build_log_url)
                     return
             except Exception as fail:
                 if required:
                     logger.exception("Code deployment failed")
                     update_deployment_status(payload, "failure",
-                                             "Deployment failed with statuscode {}".format(fail.args[1]),build_log_url)
+                                             "Deployment failed with statuscode {}".format(fail.args[1]), build_log_url)
                     return
     update_deployment_status(payload, "success", "Deployment finished", build_log_url)
+    logger.info("Deploy finished!")
 
 
 def update_deployment_status(payload, state, description, log_url):
@@ -135,6 +143,7 @@ def runInBackground(exe):
     subprocess.Popen(exe)
     logger.info("Starting " + str(exe))
 
+
 def runProcess(exe):
     logger.info("Running " + str(exe))
     p = subprocess.Popen(exe, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -142,7 +151,9 @@ def runProcess(exe):
         retcode = p.poll()  # returns None while subprocess is running
         line = p.stdout.readline()
         try:
-            logger.info(line.decode("utf-8")[::-1].replace('\n', '', 1)[::-1])
+            line = line.decode("utf-8")[::-1].replace('\n', '', 1)[::-1]
+            if not line == "":
+                logger.info(line)
         except:
             logger.info(line)
         if retcode is not None:
